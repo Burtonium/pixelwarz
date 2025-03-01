@@ -1,8 +1,12 @@
 import { PrismaAdapter } from "@auth/prisma-adapter";
 import { type DefaultSession, type NextAuthConfig } from "next-auth";
-import DiscordProvider from "next-auth/providers/discord";
+import CredentialsProvider from "next-auth/providers/credentials";
 
+import { SiweMessage } from "siwe";
 import { db } from "~/server/db";
+import { z } from "zod";
+import { env } from "~/env";
+import cookie from "cookie";
 
 /**
  * Module augmentation for `next-auth` types. Allows us to add custom properties to the `session`
@@ -32,25 +36,46 @@ declare module "next-auth" {
  */
 export const authConfig = {
   providers: [
-    DiscordProvider,
-    /**
-     * ...add more providers here.
-     *
-     * Most other providers require a bit more work than the Discord provider. For example, the
-     * GitHub provider requires you to add the `refresh_token_expires_in` field to the Account
-     * model. Refer to the NextAuth.js docs for the provider you want to use. Example:
-     *
-     * @see https://next-auth.js.org/providers/github
-     */
+    CredentialsProvider({
+      name: "Ethereum",
+      credentials: {
+        message: {
+          label: "Message",
+          type: "text",
+          placeholder: "0x0",
+        },
+        signature: {
+          label: "Signature",
+          type: "text",
+          placeholder: "0x0",
+        },
+      },
+      authorize: async ({ message = "{}", signature = "" }, req) => {
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
+          const siwe = new SiweMessage(JSON.parse(z.string().parse(message)));
+          const nextAuthUrl = new URL(env.NEXTAUTH_URL);
+
+          const cookies = cookie.parse(req.headers.get("cookie") ?? "");
+          const result = await siwe.verify({
+            signature: z.string().parse(signature) || "",
+            domain: nextAuthUrl.host,
+            nonce: cookies["next-auth.csrf-token"],
+          });
+
+          return result.success ? { id: siwe.address } : null;
+        } catch (e) {
+          console.error(e);
+          return null;
+        }
+      },
+    }),
   ],
   adapter: PrismaAdapter(db),
   callbacks: {
-    session: ({ session, user }) => ({
-      ...session,
-      user: {
-        ...session.user,
-        id: user.id,
-      },
-    }),
+    async session({ session, token }) {
+      session.user.id = z.string().parse(token.sub);
+      return session;
+    },
   },
 } satisfies NextAuthConfig;
